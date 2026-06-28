@@ -79,7 +79,7 @@ async function sendVerification(chatId) {
   let text = `🔒 *CHANNEL VERIFICATION*\n\n`;
   text += `📦 To use *${botName}*, join ALL channels below:\n\n`;
 
-  channels.forEach((ch, i) => {
+  channels.forEach((ch) => {
     text += `📢 [${ch.channel_name}](${ch.channel_link})\n`;
   });
 
@@ -106,12 +106,10 @@ async function sendVerification(chatId) {
 
 async function sendMainMenu(chatId, user) {
   const rank = await getRank(user.credits);
-  const referralCount = await supabase
+  const { count: refs } = await supabase
     .from('referrals')
     .select('id', { count: 'exact' })
     .eq('referrer_id', user.telegram_id);
-
-  const refs = referralCount.count || 0;
 
   const text =
     `⭐ *LEAKED STUFF* ⭐\n` +
@@ -120,7 +118,7 @@ async function sendMainMenu(chatId, user) {
     `👤 *YOUR STATS*\n` +
     `• Rank: ${rank}\n` +
     `• Credits: ${user.credits} 💰\n` +
-    `• Referrals: ${refs} 🔗\n` +
+    `• Referrals: ${refs || 0} 🔗\n` +
     `─────────────────\n` +
     `📱 *MAIN MENU*`;
 
@@ -155,7 +153,6 @@ async function handleStart(msg, referralCode) {
   let user = await getUser(telegramId);
 
   if (!user) {
-    // New user — check referral
     let referredBy = null;
     if (referralCode && referralCode.startsWith('ref_')) {
       const referrerId = parseInt(referralCode.replace('ref_', ''));
@@ -187,7 +184,7 @@ async function handleStart(msg, referralCode) {
   return sendMainMenu(chatId, user);
 }
 
-// ─── VERIFY NOW CALLBACK ───────────────────────────
+// ─── VERIFY NOW ────────────────────────────────────
 
 async function handleVerifyNow(callbackQuery) {
   const chatId = callbackQuery.message.chat.id;
@@ -203,22 +200,21 @@ async function handleVerifyNow(callbackQuery) {
     );
   }
 
-  // Mark verified
   await supabase
     .from('users')
     .update({ is_verified: true })
     .eq('telegram_id', telegramId);
 
-  // Handle referral reward
   const user = await getUser(telegramId);
+
   if (user.referred_by) {
-    const alreadyRewarded = await supabase
+    const { data: alreadyRewarded } = await supabase
       .from('referrals')
       .select('id')
       .eq('referred_id', telegramId)
       .single();
 
-    if (!alreadyRewarded.data) {
+    if (!alreadyRewarded) {
       const refCredits = parseInt(await getSetting('referral_credits') || '5');
 
       await supabase.from('referrals').insert({
@@ -232,23 +228,22 @@ async function handleVerifyNow(callbackQuery) {
         amount: refCredits
       });
 
-      // Notify referrer
       try {
         await bot.sendMessage(user.referred_by,
-          `🎉 Someone joined using your referral link!\n+${refCredits} credits added to your account! 💰`
+          `🎉 Someone joined using your referral link!\n+${refCredits} credits added! 💰`
         );
       } catch {}
     }
   }
 
-  await bot.sendMessage(chatId, '✅ Verified successfully! Welcome!');
+  await bot.sendMessage(chatId, '✅ Verified! Welcome!');
   const updatedUser = await getUser(telegramId);
   return sendMainMenu(chatId, updatedUser);
 }
 
 // ─── BROWSE FILES ──────────────────────────────────
 
-async function handleBrowseFiles(chatId, telegramId) {
+async function handleBrowseFiles(chatId) {
   const { data: files } = await supabase
     .from('files')
     .select('*')
@@ -256,10 +251,12 @@ async function handleBrowseFiles(chatId, telegramId) {
     .order('created_at', { ascending: false });
 
   if (!files || files.length === 0) {
-    return bot.sendMessage(chatId, '📭 No files available yet. Check back later!');
+    return bot.sendMessage(chatId, '📭 No files available yet!', {
+      reply_markup: {
+        inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'main_menu' }]]
+      }
+    });
   }
-
-  let text = `📦 *AVAILABLE FILES*\n─────────────────\nTap any file to view:\n\n`;
 
   const buttons = files.map(f => ([{
     text: `📦 ${f.name} (🔗${f.price_refs} | 💰${f.price_credits})`,
@@ -268,7 +265,7 @@ async function handleBrowseFiles(chatId, telegramId) {
 
   buttons.push([{ text: '⬅️ Back', callback_data: 'main_menu' }]);
 
-  await bot.sendMessage(chatId, text, {
+  await bot.sendMessage(chatId, `📦 *AVAILABLE FILES*\n─────────────────\nTap any file to view:`, {
     parse_mode: 'Markdown',
     reply_markup: { inline_keyboard: buttons }
   });
@@ -285,7 +282,6 @@ async function handleViewFile(chatId, telegramId, fileId) {
 
   if (!file) return bot.sendMessage(chatId, '❌ File not found.');
 
-  // Check if already purchased
   const { data: purchase } = await supabase
     .from('purchases')
     .select('id')
@@ -331,18 +327,16 @@ async function handleBuyFile(chatId, telegramId, fileId) {
 
   if (user.credits < file.price_credits) {
     return bot.sendMessage(chatId,
-      `❌ Not enough credits!\n\nYou have *${user.credits}* credits but need *${file.price_credits}*.\n\nShare your referral link to earn more!`,
+      `❌ Not enough credits!\n\nYou have *${user.credits}* but need *${file.price_credits}*.\n\nShare referral link to earn more!`,
       { parse_mode: 'Markdown' }
     );
   }
 
-  // Deduct credits
   await supabase
     .from('users')
     .update({ credits: user.credits - file.price_credits })
     .eq('telegram_id', telegramId);
 
-  // Save purchase
   await supabase.from('purchases').insert({
     user_telegram_id: telegramId,
     file_id: fileId,
@@ -350,7 +344,7 @@ async function handleBuyFile(chatId, telegramId, fileId) {
   });
 
   await bot.sendMessage(chatId,
-    `✅ *Unlocked Successfully!*\n─────────────────\n📦 *${file.name}*\n\n${file.content}`,
+    `✅ *Unlocked!*\n─────────────────\n📦 *${file.name}*\n\n${file.content}`,
     { parse_mode: 'Markdown' }
   );
 }
@@ -368,12 +362,12 @@ async function handleMyReferrals(chatId, telegramId) {
 
   const text =
     `🔗 *MY REFERRALS*\n─────────────────\n\n` +
-    `👥 Total people you referred: *${count || 0}*\n` +
+    `👥 Total referred: *${count || 0}*\n` +
     `💰 Credits earned: *${totalCredits}*\n\n` +
     `─────────────────\n` +
     `🔗 *Your Referral Link:*\n` +
     `https://t.me/${process.env.BOT_USERNAME}?start=ref_${telegramId}\n\n` +
-    `Share this link — each person who joins gives you *+${refCredits} credits!* 💰`;
+    `Each person who joins = *+${refCredits} credits!* 💰`;
 
   await bot.sendMessage(chatId, text, {
     parse_mode: 'Markdown',
@@ -397,7 +391,7 @@ async function handleLeaderboard(chatId) {
     return bot.sendMessage(chatId, '🏆 No users yet!');
   }
 
-  const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+  const medals = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
   let text = `🏆 *LEADERBOARD*\n─────────────────\n\n`;
 
   users.forEach((u, i) => {
@@ -418,10 +412,10 @@ async function handleLeaderboard(chatId) {
 async function handleHelp(chatId) {
   const text =
     `❓ *HELP*\n─────────────────\n\n` +
-    `📦 *Browse Files* — View and unlock files using credits\n\n` +
-    `🔗 *Referrals* — Share your link, earn +5 credits per join\n\n` +
+    `📦 *Browse Files* — Unlock files using credits\n\n` +
+    `🔗 *Referrals* — Share link, earn +5 credits per join\n\n` +
     `🏆 *Leaderboard* — Top users by credits\n\n` +
-    `💰 *Credits* — Currency to unlock files\n\n` +
+    `💰 *Credits* — Used to unlock files\n\n` +
     `─────────────────\n` +
     `For support contact admin.`;
 
@@ -439,23 +433,19 @@ async function handleAdmin(chatId, telegramId) {
   const admin = await isAdmin(telegramId);
   if (!admin) return bot.sendMessage(chatId, '🚫 Access denied.');
 
-  const text = `⚙️ *ADMIN PANEL*\n─────────────────\nWelcome, Admin!`;
-
-  const keyboard = {
-    inline_keyboard: [
-      [{ text: '📦 Add File', callback_data: 'admin_add_file' }],
-      [{ text: '📋 List Files', callback_data: 'admin_list_files' }],
-      [{ text: '📢 Add Channel', callback_data: 'admin_add_channel' }],
-      [{ text: '📋 List Channels', callback_data: 'admin_list_channels' }],
-      [{ text: '📡 Broadcast', callback_data: 'admin_broadcast' }],
-      [{ text: '👥 User Stats', callback_data: 'admin_stats' }],
-      [{ text: '⚙️ Set Referral Credits', callback_data: 'admin_set_ref_credits' }]
-    ]
-  };
-
-  await bot.sendMessage(chatId, text, {
+  await bot.sendMessage(chatId, `⚙️ *ADMIN PANEL*\n─────────────────\nWelcome, Admin!`, {
     parse_mode: 'Markdown',
-    reply_markup: keyboard
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '📦 Add File', callback_data: 'admin_add_file' }],
+        [{ text: '📋 List Files', callback_data: 'admin_list_files' }],
+        [{ text: '📢 Add Channel', callback_data: 'admin_add_channel' }],
+        [{ text: '📋 List Channels', callback_data: 'admin_list_channels' }],
+        [{ text: '📡 Broadcast', callback_data: 'admin_broadcast' }],
+        [{ text: '👥 User Stats', callback_data: 'admin_stats' }],
+        [{ text: '⚙️ Set Referral Credits', callback_data: 'admin_set_ref_credits' }]
+      ]
+    }
   });
 }
 
@@ -463,49 +453,41 @@ async function handleAdmin(chatId, telegramId) {
 
 async function handleAdminStats(chatId) {
   const { count: totalUsers } = await supabase
-    .from('users')
-    .select('*', { count: 'exact' });
+    .from('users').select('*', { count: 'exact' });
 
   const { count: verifiedUsers } = await supabase
-    .from('users')
-    .select('*', { count: 'exact' })
-    .eq('is_verified', true);
+    .from('users').select('*', { count: 'exact' }).eq('is_verified', true);
 
   const { count: totalFiles } = await supabase
-    .from('files')
-    .select('*', { count: 'exact' });
+    .from('files').select('*', { count: 'exact' });
 
   const { count: totalPurchases } = await supabase
-    .from('purchases')
-    .select('*', { count: 'exact' });
+    .from('purchases').select('*', { count: 'exact' });
 
   const { count: totalReferrals } = await supabase
-    .from('referrals')
-    .select('*', { count: 'exact' });
+    .from('referrals').select('*', { count: 'exact' });
 
-  const text =
-    `📊 *USER STATS*\n─────────────────\n\n` +
+  await bot.sendMessage(chatId,
+    `📊 *STATS*\n─────────────────\n\n` +
     `👥 Total Users: *${totalUsers || 0}*\n` +
     `✅ Verified: *${verifiedUsers || 0}*\n` +
-    `📦 Total Files: *${totalFiles || 0}*\n` +
-    `🛒 Total Purchases: *${totalPurchases || 0}*\n` +
-    `🔗 Total Referrals: *${totalReferrals || 0}*`;
-
-  await bot.sendMessage(chatId, text, {
-    parse_mode: 'Markdown',
-    reply_markup: {
-      inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_panel' }]]
+    `📦 Files: *${totalFiles || 0}*\n` +
+    `🛒 Purchases: *${totalPurchases || 0}*\n` +
+    `🔗 Referrals: *${totalReferrals || 0}*`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_panel' }]]
+      }
     }
-  });
+  );
 }
 
 // ─── ADMIN LIST FILES ──────────────────────────────
 
 async function handleAdminListFiles(chatId) {
   const { data: files } = await supabase
-    .from('files')
-    .select('*')
-    .order('created_at', { ascending: false });
+    .from('files').select('*').order('created_at', { ascending: false });
 
   if (!files || files.length === 0) {
     return bot.sendMessage(chatId, '📭 No files yet.', {
@@ -516,8 +498,8 @@ async function handleAdminListFiles(chatId) {
   }
 
   const buttons = files.map(f => ([
-    { text: `📦 ${f.name}`, callback_data: `admin_view_file_${f.id}` },
-    { text: `🗑️`, callback_data: `admin_delete_file_${f.id}` }
+    { text: `📦 ${f.name}`, callback_data: `noop` },
+    { text: `🗑️ Delete`, callback_data: `admin_delete_file_${f.id}` }
   ]));
 
   buttons.push([{ text: '⬅️ Back', callback_data: 'admin_panel' }]);
@@ -543,7 +525,7 @@ async function handleAdminListChannels(chatId) {
 
   const buttons = channels.map(ch => ([
     { text: `📢 ${ch.channel_name}`, callback_data: `noop` },
-    { text: `🗑️`, callback_data: `admin_delete_channel_${ch.id}` }
+    { text: `🗑️ Delete`, callback_data: `admin_delete_channel_${ch.id}` }
   ]));
 
   buttons.push([{ text: '⬅️ Back', callback_data: 'admin_panel' }]);
@@ -557,13 +539,12 @@ async function handleAdminListChannels(chatId) {
 // ─── CONVERSATION STATE ────────────────────────────
 const userState = {};
 
-// ─── PROCESS ADMIN TEXT INPUT ──────────────────────
+// ─── PROCESS ADMIN INPUT ───────────────────────────
 
 async function processAdminInput(chatId, telegramId, text) {
   const state = userState[telegramId];
   if (!state) return false;
 
-  // ADD FILE FLOW
   if (state.step === 'add_file_name') {
     userState[telegramId] = { step: 'add_file_desc', name: text };
     await bot.sendMessage(chatId, '📝 Enter file *description*:', { parse_mode: 'Markdown' });
@@ -572,20 +553,20 @@ async function processAdminInput(chatId, telegramId, text) {
 
   if (state.step === 'add_file_desc') {
     userState[telegramId] = { ...state, step: 'add_file_content', desc: text };
-    await bot.sendMessage(chatId, '📄 Enter file *content* (the actual method/text users will see):', { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, '📄 Enter file *content* (what users will see after unlocking):', { parse_mode: 'Markdown' });
     return true;
   }
 
   if (state.step === 'add_file_content') {
     userState[telegramId] = { ...state, step: 'add_file_price', content: text };
-    await bot.sendMessage(chatId, '💰 Enter file *price in credits*:', { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, '💰 Enter *price in credits*:', { parse_mode: 'Markdown' });
     return true;
   }
 
   if (state.step === 'add_file_price') {
     const price = parseInt(text);
     if (isNaN(price)) {
-      await bot.sendMessage(chatId, '❌ Invalid number. Enter price again:');
+      await bot.sendMessage(chatId, '❌ Invalid. Enter a number:');
       return true;
     }
     userState[telegramId] = { ...state, step: 'add_file_refs', price };
@@ -598,19 +579,15 @@ async function processAdminInput(chatId, telegramId, text) {
     const { name, desc, content, price } = state;
 
     await supabase.from('files').insert({
-      name,
-      description: desc,
-      content,
-      price_credits: price,
-      price_refs: priceRefs
+      name, description: desc, content,
+      price_credits: price, price_refs: priceRefs
     });
 
     delete userState[telegramId];
-    await bot.sendMessage(chatId, `✅ File *"${name}"* added successfully!`, { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, `✅ File *"${name}"* added!`, { parse_mode: 'Markdown' });
     return true;
   }
 
-  // ADD CHANNEL FLOW
   if (state.step === 'add_channel_id') {
     userState[telegramId] = { step: 'add_channel_name', channel_id: text };
     await bot.sendMessage(chatId, '📢 Enter channel *display name*:', { parse_mode: 'Markdown' });
@@ -619,31 +596,24 @@ async function processAdminInput(chatId, telegramId, text) {
 
   if (state.step === 'add_channel_name') {
     userState[telegramId] = { ...state, step: 'add_channel_link', channel_name: text };
-    await bot.sendMessage(chatId, '🔗 Enter channel *invite link* (https://t.me/...):', { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, '🔗 Enter channel *invite link*:', { parse_mode: 'Markdown' });
     return true;
   }
 
   if (state.step === 'add_channel_link') {
     const { channel_id, channel_name } = state;
-
     await supabase.from('required_channels').insert({
-      channel_id,
-      channel_name,
-      channel_link: text
+      channel_id, channel_name, channel_link: text
     });
-
     delete userState[telegramId];
     await bot.sendMessage(chatId, `✅ Channel *"${channel_name}"* added!`, { parse_mode: 'Markdown' });
     return true;
   }
 
-  // BROADCAST FLOW
   if (state.step === 'broadcast_msg') {
     delete userState[telegramId];
     const { data: users } = await supabase
-      .from('users')
-      .select('telegram_id')
-      .eq('is_verified', true);
+      .from('users').select('telegram_id').eq('is_verified', true);
 
     let sent = 0;
     for (const u of (users || [])) {
@@ -652,24 +622,19 @@ async function processAdminInput(chatId, telegramId, text) {
         sent++;
       } catch {}
     }
-
-    await bot.sendMessage(chatId, `✅ Broadcast sent to *${sent}* users.`, { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, `✅ Sent to *${sent}* users.`, { parse_mode: 'Markdown' });
     return true;
   }
 
-  // SET REFERRAL CREDITS FLOW
   if (state.step === 'set_ref_credits') {
     const val = parseInt(text);
-    if (isNaN(val) || val < 0) {
-      await bot.sendMessage(chatId, '❌ Invalid number. Try again:');
+    if (isNaN(val)) {
+      await bot.sendMessage(chatId, '❌ Invalid. Enter a number:');
       return true;
     }
     delete userState[telegramId];
-    await supabase
-      .from('settings')
-      .update({ value: String(val) })
-      .eq('key', 'referral_credits');
-
+    await supabase.from('settings')
+      .update({ value: String(val) }).eq('key', 'referral_credits');
     await bot.sendMessage(chatId, `✅ Referral credits set to *${val}*!`, { parse_mode: 'Markdown' });
     return true;
   }
@@ -677,14 +642,13 @@ async function processAdminInput(chatId, telegramId, text) {
   return false;
 }
 
-// ─── MAIN WEBHOOK HANDLER ──────────────────────────
+// ─── WEBHOOK ROUTE ─────────────────────────────────
 
 app.post('/api/webhook', async (req, res) => {
   res.sendStatus(200);
   const body = req.body;
 
   try {
-    // CALLBACK QUERIES
     if (body.callback_query) {
       const cb = body.callback_query;
       const chatId = cb.message.chat.id;
@@ -697,10 +661,16 @@ app.post('/api/webhook', async (req, res) => {
 
       if (data === 'verify_now') return handleVerifyNow(cb);
       if (data === 'main_menu') return sendMainMenu(chatId, user);
-      if (data === 'browse_files') return handleBrowseFiles(chatId, telegramId);
+      if (data === 'browse_files') return handleBrowseFiles(chatId);
       if (data === 'my_referrals') return handleMyReferrals(chatId, telegramId);
       if (data === 'leaderboard') return handleLeaderboard(chatId);
       if (data === 'help') return handleHelp(chatId);
+      if (data === 'admin_panel') return handleAdmin(chatId, telegramId);
+      if (data === 'admin_stats') return handleAdminStats(chatId);
+      if (data === 'admin_list_files') return handleAdminListFiles(chatId);
+      if (data === 'admin_list_channels') return handleAdminListChannels(chatId);
+      if (data === 'noop') return;
+
       if (data === 'my_credits') {
         const rank = await getRank(user.credits);
         return bot.sendMessage(chatId,
@@ -711,22 +681,6 @@ app.post('/api/webhook', async (req, res) => {
           }
         );
       }
-
-      if (data.startsWith('file_')) {
-        const fileId = data.replace('file_', '');
-        return handleViewFile(chatId, telegramId, fileId);
-      }
-
-      if (data.startsWith('buy_')) {
-        const fileId = data.replace('buy_', '');
-        return handleBuyFile(chatId, telegramId, fileId);
-      }
-
-      // ADMIN CALLBACKS
-      if (data === 'admin_panel') return handleAdmin(chatId, telegramId);
-      if (data === 'admin_stats') return handleAdminStats(chatId);
-      if (data === 'admin_list_files') return handleAdminListFiles(chatId);
-      if (data === 'admin_list_channels') return handleAdminListChannels(chatId);
 
       if (data === 'admin_add_file') {
         userState[telegramId] = { step: 'add_file_name' };
@@ -748,6 +702,16 @@ app.post('/api/webhook', async (req, res) => {
         return bot.sendMessage(chatId, '⚙️ Enter new *referral credits* amount:', { parse_mode: 'Markdown' });
       }
 
+      if (data.startsWith('file_')) {
+        const fileId = data.replace('file_', '');
+        return handleViewFile(chatId, telegramId, fileId);
+      }
+
+      if (data.startsWith('buy_')) {
+        const fileId = data.replace('buy_', '');
+        return handleBuyFile(chatId, telegramId, fileId);
+      }
+
       if (data.startsWith('admin_delete_file_')) {
         const fileId = data.replace('admin_delete_file_', '');
         await supabase.from('files').delete().eq('id', fileId);
@@ -767,7 +731,6 @@ app.post('/api/webhook', async (req, res) => {
       return;
     }
 
-    // MESSAGES
     if (body.message) {
       const msg = body.message;
       const chatId = msg.chat.id;
@@ -784,14 +747,12 @@ app.post('/api/webhook', async (req, res) => {
         return handleAdmin(chatId, telegramId);
       }
 
-      // Check if admin is in input flow
       const isAdminUser = await isAdmin(telegramId);
       if (isAdminUser) {
         const handled = await processAdminInput(chatId, telegramId, text);
         if (handled) return;
       }
 
-      // Default
       const user = await getUser(telegramId);
       if (user && user.is_verified) {
         return sendMainMenu(chatId, user);
@@ -801,10 +762,11 @@ app.post('/api/webhook', async (req, res) => {
     }
 
   } catch (err) {
-    console.error('Webhook error:', err);
+    console.error('Error:', err);
   }
 });
 
-app.get('/', (req, res) => res.send('Bot is running!'));
+app.get('/', (req, res) => res.send('Bot is running! ✅'));
+app.get('/api/webhook', (req, res) => res.send('Webhook is active! ✅'));
 
 module.exports = app;
