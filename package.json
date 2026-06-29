@@ -2,9 +2,8 @@
   "name": "leaked-stuff-bot",
   "version": "1.0.0",
   "dependencies": {
-    "node-telegram-bot-api": "^0.64.0",
-    "@supabase/supabase-js": "^2.39.0",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "@supabase/supabase-js": "^2.39.0"
   },
   "engines": {
     "node": "24.x"
