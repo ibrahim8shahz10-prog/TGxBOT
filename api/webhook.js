@@ -3,34 +3,38 @@ const { createClient } = require('@supabase/supabase-js');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const BOT_USERNAME = process.env.BOT_USERNAME;
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+console.log('ENV CHECK:', {
+  hasBotToken: !!BOT_TOKEN,
+  hasBotUsername: !!BOT_USERNAME,
+  hasSupabaseUrl: !!SUPABASE_URL,
+  hasSupabaseKey: !!SUPABASE_KEY
+});
+
+const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 async function sendMessage(chatId, text, keyboard) {
-  const payload = {
-    chat_id: chatId,
-    text,
-    parse_mode: 'Markdown'
-  };
+  const payload = { chat_id: chatId, text, parse_mode: 'Markdown' };
   if (keyboard) payload.reply_markup = { inline_keyboard: keyboard };
-  await axios.post(`${TELEGRAM_API}/sendMessage`, payload);
+  try {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, payload);
+  } catch (err) {
+    console.error('sendMessage error:', err.response?.data || err.message);
+  }
 }
 
-async function answerCallback(id, text) {
-  await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, {
-    callback_query_id: id, text: text || ''
-  });
+async function answerCallback(id) {
+  try {
+    await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, { callback_query_id: id });
+  } catch {}
 }
 
 async function getChatMember(channelId, userId) {
   try {
-    const res = await axios.post(`${TELEGRAM_API}/getChatMember`, {
-      chat_id: channelId, user_id: userId
-    });
+    const res = await axios.post(`${TELEGRAM_API}/getChatMember`, { chat_id: channelId, user_id: userId });
     return res.data.result;
   } catch { return null; }
 }
@@ -68,7 +72,7 @@ async function verifyAllChannels(userId) {
   for (const ch of channels) {
     try {
       const member = await getChatMember(ch.channel_id, userId);
-      if (!member || !['member','administrator','creator'].includes(member.status)) return false;
+      if (!member || !['member', 'administrator', 'creator'].includes(member.status)) return false;
     } catch { return false; }
   }
   return true;
@@ -84,12 +88,10 @@ function getRank(credits) {
 async function sendVerification(chatId) {
   const channels = await getChannels();
   const botName = await getSetting('bot_name') || 'LEAKED STUFF';
-
   let text = `🔒 *CHANNEL VERIFICATION*\n\n`;
   text += `📦 To use *${botName}*, join ALL channels:\n\n`;
   channels.forEach(ch => { text += `📢 [${ch.channel_name}](${ch.channel_link})\n`; });
   text += `\n─────────────────\n⚠️ After joining tap *Verify Now*.`;
-
   const buttons = channels.map(ch => ([{ text: `📢 ${ch.channel_name}`, url: ch.channel_link }]));
   buttons.push([{ text: "✅ I've Joined – Verify Now", callback_data: 'verify_now' }]);
   await sendMessage(chatId, text, buttons);
@@ -98,13 +100,11 @@ async function sendVerification(chatId) {
 async function sendMainMenu(chatId, user) {
   const rank = getRank(user.credits);
   const { count: refs } = await supabase.from('referrals').select('id', { count: 'exact' }).eq('referrer_id', user.telegram_id);
-
   const text =
     `⭐ *LEAKED STUFF* ⭐\n─────────────────\n` +
     `Welcome, *${user.first_name || 'User'}*!\n\n` +
     `👤 *YOUR STATS*\n• Rank: ${rank}\n• Credits: ${user.credits} 💰\n• Referrals: ${refs || 0} 🔗\n` +
     `─────────────────\n📱 *MAIN MENU*`;
-
   await sendMessage(chatId, text, [
     [{ text: '📦 Browse Files', callback_data: 'browse_files' }],
     [{ text: '🔗 My Referrals', callback_data: 'my_referrals' }, { text: '🏆 Leaderboard', callback_data: 'leaderboard' }],
@@ -115,7 +115,7 @@ async function sendMainMenu(chatId, user) {
 async function handleStart(msg, refCode) {
   const chatId = msg.chat.id;
   const telegramId = msg.from.id;
-
+  console.log('handleStart called for:', telegramId);
   try {
     let user = await getUser(telegramId);
     if (!user) {
@@ -124,7 +124,7 @@ async function handleStart(msg, refCode) {
         const rid = parseInt(refCode.replace('ref_', ''));
         if (rid !== telegramId) referredBy = rid;
       }
-      await supabase.from('users').insert({
+      const { error } = await supabase.from('users').insert({
         telegram_id: telegramId,
         username: msg.from.username || null,
         first_name: msg.from.first_name || 'User',
@@ -132,6 +132,7 @@ async function handleStart(msg, refCode) {
         referred_by: referredBy,
         is_verified: false
       });
+      if (error) console.error('Insert error:', JSON.stringify(error));
       user = await getUser(telegramId);
     }
     if (!user) return sendMessage(chatId, '❌ Error loading account. Try /start again.');
@@ -146,11 +147,9 @@ async function handleStart(msg, refCode) {
 
 async function handleVerifyNow(chatId, telegramId, callbackId) {
   try {
-    await answerCallback(callbackId, 'Checking...');
+    await answerCallback(callbackId);
     const allJoined = await verifyAllChannels(telegramId);
-    if (!allJoined) {
-      return sendMessage(chatId, '❌ You have not joined all channels yet!\n\nJoin ALL channels then tap Verify again.');
-    }
+    if (!allJoined) return sendMessage(chatId, '❌ You have not joined all channels yet!\n\nJoin ALL then tap Verify again.');
     await supabase.from('users').update({ is_verified: true }).eq('telegram_id', telegramId);
     const user = await getUser(telegramId);
     if (user && user.referred_by) {
@@ -159,7 +158,7 @@ async function handleVerifyNow(chatId, telegramId, callbackId) {
         const refCredits = parseInt(await getSetting('referral_credits') || '5');
         await supabase.from('referrals').insert({ referrer_id: user.referred_by, referred_id: telegramId, credits_awarded: refCredits });
         await supabase.rpc('increment_credits', { user_tid: user.referred_by, amount: refCredits });
-        try { await sendMessage(user.referred_by, `🎉 Someone joined via your link\\!\n+${refCredits} credits added\\! 💰`); } catch {}
+        try { await sendMessage(user.referred_by, `🎉 Someone joined via your link!\n+${refCredits} credits added! 💰`); } catch {}
       }
     }
     await sendMessage(chatId, '✅ Verified! Welcome!');
@@ -320,8 +319,8 @@ async function processAdminInput(chatId, telegramId, text) {
 module.exports = async (req, res) => {
   res.status(200).json({ ok: true });
   if (req.method !== 'POST') return;
-
   const body = req.body;
+  console.log('Received update:', JSON.stringify(body).substring(0, 200));
   try {
     if (body.callback_query) {
       const cb = body.callback_query;
@@ -352,7 +351,6 @@ module.exports = async (req, res) => {
       if (data.startsWith('admin_delete_channel_')) { await supabase.from('required_channels').delete().eq('id', data.replace('admin_delete_channel_', '')); return sendMessage(chatId, '🗑️ Removed!', [[{ text: '⬅️ Back', callback_data: 'admin_list_channels' }]]); }
       return;
     }
-
     if (body.message) {
       const msg = body.message;
       const chatId = msg.chat.id;
@@ -368,6 +366,6 @@ module.exports = async (req, res) => {
       return sendVerification(chatId);
     }
   } catch (err) {
-    console.error('MAIN ERROR:', err.message);
+    console.error('MAIN ERROR:', err.message, err.stack);
   }
 };
